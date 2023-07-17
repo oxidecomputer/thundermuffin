@@ -1,0 +1,138 @@
+use crate::util::{buffer, show_speed};
+use crate::{Cli, Client, Participant, Server};
+use anyhow::Result;
+use socket2::{Domain, Protocol, Socket, Type};
+use std::mem::MaybeUninit;
+use std::net::{IpAddr, SocketAddrV4, SocketAddrV6};
+use std::thread;
+
+pub(crate) fn run(cli: &Cli) -> Result<()> {
+    match cli.kind {
+        Participant::Client(ref client) => run_client(cli, client),
+        Participant::Server(ref server) => run_server(cli, server),
+    }
+}
+
+fn run_client(cli: &Cli, client: &Client) -> Result<()> {
+    let s = match client.server {
+        IpAddr::V4(addr) => {
+            let sa = SocketAddrV4::new(addr, cli.port);
+            let s =
+                Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+            s.connect(&sa.into())?;
+            s
+        }
+        IpAddr::V6(addr) => {
+            let sa = SocketAddrV6::new(addr, cli.port, 0, cli.scope);
+            let s =
+                Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+            s.connect(&sa.into())?;
+            s
+        }
+    };
+
+    let buf = buffer(cli.buffer_size);
+
+    let start = std::time::Instant::now();
+    let mut interval = 0;
+    let mut interval_sent = 0;
+    //let mut perf = Vec::new();
+    let mut total = 0;
+    let mut count = 0;
+    loop {
+        let n = s.send(&buf)?;
+
+        interval_sent += n * 8;
+        let t = std::time::Instant::now();
+        let d = t.duration_since(start);
+        let ds = d.as_secs();
+        if ds > interval {
+            //perf.push(interval_sent);
+            interval = ds;
+            total += interval_sent;
+            print!("[{}] ", count);
+            count += 1;
+            show_speed(interval_sent as f64);
+            interval_sent = 0;
+        }
+        if ds >= client.duration {
+            break;
+        }
+    }
+
+    println!("------");
+    show_speed(total as f64 / client.duration as f64);
+
+    //println!("{:#?}", perf);
+
+    Ok(())
+}
+
+fn run_server(cli: &Cli, server: &Server) -> Result<()> {
+    let s = match server.listen {
+        IpAddr::V4(addr) => {
+            let sa = SocketAddrV4::new(addr, cli.port);
+            let s =
+                Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+            s.bind(&sa.into())?;
+            s
+        }
+        IpAddr::V6(addr) => {
+            let sa = SocketAddrV6::new(addr, cli.port, 0, cli.scope);
+            let s =
+                Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+            s.bind(&sa.into())?;
+            s
+        }
+    };
+
+    //TODO s.set_quickack(true)?;
+    s.set_nodelay(true)?;
+    s.listen(cli.backlog)?;
+
+    loop {
+        let (sk, _sa) = s.accept()?;
+        let sz = cli.buffer_size;
+        thread::spawn(move || {
+            let mut buf = vec![MaybeUninit::<u8>::uninit(); sz];
+            let mut interval = 0;
+            let mut interval_sent = 0;
+            //let mut perf = Vec::new();
+            let mut total = 0;
+            let mut count = 0;
+            let start = std::time::Instant::now();
+
+            loop {
+                let mut n = 0;
+                loop {
+                    let r = sk.recv(&mut buf).unwrap();
+                    if r == 0 {
+                        break;
+                    }
+                    n += r;
+
+                    interval_sent += r * 8;
+                    let t = std::time::Instant::now();
+                    let d = t.duration_since(start);
+                    let ds = d.as_secs();
+                    if ds > interval {
+                        interval = ds;
+                        total += interval_sent;
+                        print!("[{}] ", count);
+                        count += 1;
+                        show_speed(interval_sent as f64);
+                        interval_sent = 0;
+                    }
+
+                    if n == sz {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+                //sk.send(b"muffin").unwrap();
+            }
+        });
+    }
+}
