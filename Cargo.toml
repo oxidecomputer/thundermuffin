@@ -1,11 +1,16 @@
-[package]
-name = "thundermuffin"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "2"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+default-members = [
+    "app",
+]
 
-[dependencies]
+members = [
+    "app",
+    "package",
+]
+
+[workspace.dependencies]
 anyhow = "1.0.69"
 clap = { version = "4.1.6", features = ["derive"] }
 socket2 = { version = "0.4.7", features = ["all"] }

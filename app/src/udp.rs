@@ -85,6 +85,7 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
     let mut interval = 0;
     let mut interval_sent = 0;
     //let mut perf = Vec::new();
+    #[allow(unused_variables)]
     let mut total = 0;
     let mut count = 0;
     let start = std::time::Instant::now();

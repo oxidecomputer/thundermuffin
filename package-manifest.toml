@@ -1,0 +1,10 @@
+[package.thundermuffin]
+service_name = "thundermuffin"
+source.type = "local"
+source.rust.binary_names = ["thundermuffin"]
+source.rust.release = true
+source.paths = [
+  { from = "smf/method_script.sh", to = "/opt/oxide/thundermuffin/pkg/method_script.sh" },
+  { from = "smf/thundermuffin/manifest.xml", to = "/var/svc/manifest/site/thundermuffin/manifest.xml" },
+]
+output.type = "zone"
