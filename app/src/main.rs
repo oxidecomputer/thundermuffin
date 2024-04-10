@@ -11,7 +11,7 @@ mod util;
 #[command(version, about)]
 struct Cli {
     /// Transport to use.
-    #[arg(short, long, value_enum, default_value_t = Transport::TCP)]
+    #[arg(short, long, value_enum, default_value_t = Transport::Tcp)]
     transport: Transport,
 
     /// Port to use.
@@ -63,8 +63,8 @@ struct Server {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum Transport {
-    TCP,
-    UDP,
+    Tcp,
+    Udp,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -82,7 +82,7 @@ enum Kind {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.transport {
-        Transport::TCP => tcp::run(&cli),
-        Transport::UDP => udp::run(&cli),
+        Transport::Tcp => tcp::run(&cli),
+        Transport::Udp => udp::run(&cli),
     }
 }

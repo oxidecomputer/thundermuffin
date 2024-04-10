@@ -1,0 +1,9 @@
+[package]
+name = "thundermuffin-package"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+omicron-zone-package = "0.9.1"
+anyhow.workspace = true
+tokio = { version = "1", features = ["full"] }
