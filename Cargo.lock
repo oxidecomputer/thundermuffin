@@ -565,6 +565,7 @@ checksum = "7943c866cc5cd64cbc25b2e01621d07fa8eb2a1a23160ee81ce38704e97b8ecf"
 [[package]]
 name = "ispf"
 version = "0.1.0"
+source = "git+https://github.com/oxidecomputer/ispf?branch=enum-ser#02b06e6625a5281b6e24af17925e9d9318f1abb4"
 dependencies = [
  "serde",
 ]

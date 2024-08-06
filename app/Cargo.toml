@@ -6,8 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-#ispf = { git = "https://github.com/oxidecomputer/ispf", version = "0.1.0" }
-ispf = { path = "/home/ry/src/ispf" }
+ispf = { git = "https://github.com/oxidecomputer/ispf", branch = "enum-ser" }
 libc = "0.2.155"
 serde = { version = "1.0.204", features = ["derive"] }
 socket2.workspace = true
