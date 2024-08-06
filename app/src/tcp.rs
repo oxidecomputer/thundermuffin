@@ -1,6 +1,8 @@
+use crate::ipv6::{set_dstopt, DstOpts, Opt, StrOpt};
 use crate::util::{buffer, show_speed};
 use crate::{Cli, Client, Participant, Server};
 use anyhow::Result;
+use libc::IPPROTO_TCP;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddrV4, SocketAddrV6};
@@ -26,6 +28,32 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
             let sa = SocketAddrV6::new(addr, cli.port, 0, cli.scope);
             let s =
                 Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+
+            if !client.dst_opt.is_empty() {
+                let mut total: usize =
+                    client.dst_opt.iter().map(|x| 2 + x.len()).sum();
+                total += 2;
+                let pad = 8 - (total % 8);
+                let mut options = Vec::new();
+                if pad == 1 {
+                    options.push(Opt::Pad0(0));
+                }
+                if pad >= 2 {
+                    options.push(Opt::Str(StrOpt::pad(
+                        u8::try_from(pad).unwrap(),
+                    )));
+                }
+                for opt in &client.dst_opt {
+                    options.push(Opt::Str(StrOpt::text(opt.as_str())));
+                }
+                set_dstopt(
+                    &s,
+                    &DstOpts {
+                        next: IPPROTO_TCP as u8,
+                        options,
+                    },
+                );
+            }
             s.connect(&sa.into())?;
             s
         }
