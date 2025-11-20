@@ -8,6 +8,7 @@ default-members = [
 members = [
     "app",
     "package",
+    "xtask",
 ]
 
 [workspace.dependencies]

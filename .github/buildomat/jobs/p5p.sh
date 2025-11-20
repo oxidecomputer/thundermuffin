@@ -31,11 +31,11 @@ banner build
 ptime -m cargo build --release
 
 banner package
-cargo run -p thundermuffin-package
+cargo xtask package
 
 banner copy
 pfexec mkdir -p /out
 pfexec chown "$UID" /out
 PKG_NAME="/out/thundermuffin.p5p"
-mv out/*.p5p "$PKG_NAME"
+mv pkg/packages/repo/*.p5p "$PKG_NAME"
 sha256sum "$PKG_NAME" > "$PKG_NAME.sha256"
