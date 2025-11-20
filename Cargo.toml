@@ -11,7 +11,14 @@ members = [
     "xtask",
 ]
 
+[workspace.package]
+edition = "2021"
+repository = "https://github.com/oxidecomputer/thundermuffin"
+
 [workspace.dependencies]
 anyhow = "1.0.69"
+cargo_metadata = "0.18"
 clap = { version = "4.1.6", features = ["derive"] }
+indoc = "2"
 socket2 = { version = "0.4.7", features = ["all"] }
+toml = "0.8"
