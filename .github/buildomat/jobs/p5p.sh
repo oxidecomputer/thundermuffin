@@ -2,7 +2,7 @@
 #:
 #: name = "thundermuffin-p5p"
 #: variety = "basic"
-#: target = "helios-2.0"
+#: target = "helios-2.0-20240204"
 #: rust_toolchain = "stable"
 #: output_rules = [
 #:   "=/out/thundermuffin.p5p",
