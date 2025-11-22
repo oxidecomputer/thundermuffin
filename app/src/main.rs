@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::net::IpAddr;
 
+mod ipv6;
 mod tcp;
 mod udp;
 mod util;
@@ -53,6 +54,10 @@ struct Client {
     /// values are in seconds. Data values are in buffer writes.
     #[arg(short, long, default_value_t = 10)]
     duration: u64,
+
+    /// Destination options to add to IPv6 packets
+    #[arg(long)]
+    dst_opt: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
