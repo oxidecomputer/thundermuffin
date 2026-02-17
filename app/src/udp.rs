@@ -85,8 +85,6 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
     let mut interval = 0;
     let mut interval_sent = 0;
     //let mut perf = Vec::new();
-    #[allow(unused_variables)]
-    let mut total = 0;
     let mut count = 0;
     let start = std::time::Instant::now();
 
@@ -100,7 +98,6 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
         let ds = d.as_secs();
         if ds > interval {
             interval = ds;
-            total += interval_sent;
             print!("[{}] ", count);
             count += 1;
             show_speed(interval_sent as f64);
