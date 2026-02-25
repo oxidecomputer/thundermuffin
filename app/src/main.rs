@@ -50,9 +50,10 @@ struct Client {
     mode: Mode,
 
     /// How long the test should run. Interpretation depends on mode. Time
-    /// values are in seconds. Data values are in buffer writes.
-    #[arg(short, long, default_value_t = 10)]
-    duration: u64,
+    /// values are in seconds. Data values are in buffer writes. No duration
+    /// means running forever.
+    #[arg(short, long)]
+    duration: Option<u64>,
 }
 
 #[derive(Parser, Debug)]

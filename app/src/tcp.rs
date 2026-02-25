@@ -36,7 +36,6 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
     let start = std::time::Instant::now();
     let mut interval = 0;
     let mut interval_sent = 0;
-    //let mut perf = Vec::new();
     let mut total = 0;
     let mut count = 0;
     loop {
@@ -47,7 +46,6 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
         let d = t.duration_since(start);
         let ds = d.as_secs();
         if ds > interval {
-            //perf.push(interval_sent);
             interval = ds;
             total += interval_sent;
             print!("[{}] ", count);
@@ -55,15 +53,17 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
             show_speed(interval_sent as f64);
             interval_sent = 0;
         }
-        if ds >= client.duration {
-            break;
+        if let Some(duration) = client.duration {
+            if ds >= duration {
+                break;
+            }
         }
     }
 
     println!("------");
-    show_speed(total as f64 / client.duration as f64);
-
-    //println!("{:#?}", perf);
+    if let Some(duration) = client.duration {
+        show_speed(total as f64 / duration as f64);
+    }
 
     Ok(())
 }
@@ -86,7 +86,6 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
         }
     };
 
-    //TODO s.set_quickack(true)?;
     s.set_nodelay(true)?;
     s.listen(cli.backlog)?;
 
@@ -128,7 +127,6 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
                 if n == 0 {
                     break;
                 }
-                //sk.send(b"muffin").unwrap();
             }
         });
     }
