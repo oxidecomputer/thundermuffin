@@ -1,3 +1,4 @@
+use crate::ssm::join_ssm_v6;
 use crate::util::{SEQ_LEN, buffer, get_seq, put_seq, show_speed};
 use crate::{Cli, Client, Participant, Server};
 use anyhow::{Context, Result};
@@ -25,7 +26,7 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
             let s =
                 Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
             if is_mcast {
-                s.set_multicast_ttl_v4(cli.multicast_ttl)
+                s.set_multicast_ttl_v4(cli.ttl)
                     .context("set IP_MULTICAST_TTL")?;
                 s.set_multicast_loop_v4(cli.multicast_loop)
                     .context("set IP_MULTICAST_LOOP")?;
@@ -33,6 +34,8 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
                     s.set_multicast_if_v4(&iface)
                         .context("set IP_MULTICAST_IF")?;
                 }
+            } else {
+                s.set_ttl_v4(cli.ttl).context("set IP_TTL")?;
             }
             (s, SocketAddr::V4(sa))
         }
@@ -41,7 +44,7 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
             let s =
                 Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
             if is_mcast {
-                s.set_multicast_hops_v6(cli.multicast_ttl)
+                s.set_multicast_hops_v6(cli.ttl)
                     .context("set IPV6_MULTICAST_HOPS")?;
                 s.set_multicast_loop_v6(cli.multicast_loop)
                     .context("set IPV6_MULTICAST_LOOP")?;
@@ -51,6 +54,9 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
                     s.set_multicast_if_v6(idx.get())
                         .context("set IPV6_MULTICAST_IF")?;
                 }
+            } else {
+                s.set_unicast_hops_v6(cli.ttl)
+                    .context("set IPV6_UNICAST_HOPS")?;
             }
             (s, SocketAddr::V6(sa))
         }
@@ -66,10 +72,8 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
     let mut count = 0;
     let mut seq: u64 = 0;
     loop {
-        if is_mcast {
-            put_seq(&mut buf, seq);
-            seq = seq.wrapping_add(1);
-        }
+        put_seq(&mut buf, seq);
+        seq = seq.wrapping_add(1);
         let n = s.send_to(&buf, &sa)?;
 
         interval_sent += n * 8;
@@ -95,6 +99,47 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
     Ok(())
 }
 
+/// Join `socket` to the IPv4 multicast `group` on `iface`. With `sources`
+/// non-empty it's an SSM include-mode join, one
+/// `IP_ADD_SOURCE_MEMBERSHIP` per source. Otherwise it's an any-source
+/// `(*, G)` join via `IP_ADD_MEMBERSHIP`.
+fn join_v4(
+    socket: &Socket,
+    group: Ipv4Addr,
+    iface: Ipv4Addr,
+    sources: &[Ipv4Addr],
+) -> Result<()> {
+    if sources.is_empty() {
+        return socket
+            .join_multicast_v4(&group, &iface)
+            .context("IP_ADD_MEMBERSHIP");
+    }
+    for source in sources {
+        socket
+            .join_ssm_v4(&group, source, &iface)
+            .context("IP_ADD_SOURCE_MEMBERSHIP")?;
+    }
+    Ok(())
+}
+
+/// Join `socket` to the IPv6 multicast `group` on `ifindex`. With `sources`
+/// non-empty it's an SSM include-mode join via `setsourcefilter` (one call
+/// with the full slist). Otherwise it's an any-source `(*, G)` join via
+/// `IPV6_ADD_MEMBERSHIP`.
+fn join_v6(
+    socket: &Socket,
+    group: Ipv6Addr,
+    ifindex: u32,
+    sources: &[Ipv6Addr],
+) -> Result<()> {
+    if sources.is_empty() {
+        return socket
+            .join_multicast_v6(&group, ifindex)
+            .context("IPV6_ADD_MEMBERSHIP");
+    }
+    join_ssm_v6(socket, &group, sources, ifindex).context("setsourcefilter")
+}
+
 fn run_server(cli: &Cli, server: &Server) -> Result<()> {
     let is_mcast = server.listen.is_multicast();
 
@@ -102,33 +147,33 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
         IpAddr::V4(addr) => {
             let s =
                 Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+            // Bind directly to the group address for multicast so the socket
+            // only receives datagrams sent to that group.
+            //
+            // Note: `SO_REUSEADDR` lets multiple receivers co-bind to the same
+            // group/port.
+            let sa = SocketAddrV4::new(addr, cli.port);
             if is_mcast {
                 s.set_reuse_address(true).context("SO_REUSEADDR")?;
-                let bind = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, cli.port);
-                s.bind(&bind.into())?;
+            }
+            s.bind(&sa.into())?;
+            if is_mcast {
                 let iface =
                     cli.multicast_iface.unwrap_or(Ipv4Addr::UNSPECIFIED);
-                s.join_multicast_v4(&addr, &iface)
-                    .context("IP_ADD_MEMBERSHIP")?;
-            } else {
-                let sa = SocketAddrV4::new(addr, cli.port);
-                s.bind(&sa.into())?;
+                join_v4(&s, addr, iface, &server.multicast_source_v4())?;
             }
             s
         }
         IpAddr::V6(addr) => {
             let s =
                 Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+            let sa = SocketAddrV6::new(addr, cli.port, 0, cli.scope);
             if is_mcast {
                 s.set_reuse_address(true).context("SO_REUSEADDR")?;
-                let bind =
-                    SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, cli.port, 0, 0);
-                s.bind(&bind.into())?;
-                s.join_multicast_v6(&addr, cli.scope)
-                    .context("IPV6_ADD_MEMBERSHIP")?;
-            } else {
-                let sa = SocketAddrV6::new(addr, cli.port, 0, cli.scope);
-                s.bind(&sa.into())?;
+            }
+            s.bind(&sa.into())?;
+            if is_mcast {
+                join_v6(&s, addr, cli.scope, &server.multicast_source_v6())?;
             }
             s
         }
@@ -146,7 +191,6 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
     let mut interval_sent = 0;
     let mut count = 0;
     let start = Instant::now();
-    let deadline = server.duration.map(|d| start + Duration::from_secs(d));
 
     let mut rx_count: u64 = 0;
     let mut loss_count: u64 = 0;
@@ -156,15 +200,16 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
     let mut buf = vec![0u8; cli.buffer_size];
 
     loop {
-        if let Some(deadline) = deadline
-            && Instant::now() >= deadline
+        if let Some(duration_secs) = server.duration
+            && start.elapsed().as_secs() >= duration_secs
         {
             break;
         }
 
-        // Read::read on `&Socket` calls into the same `recv` syscall as
-        // `recv_from`, but returns a `&[u8]`-shaped result. The source address
-        // is discarded either way.
+        // The source address is unused here. `Read::read` on `&Socket` routes
+        // through the same `recv` syscall as `recv_from` but operates on a
+        // plain `&mut [u8]`, avoiding the `MaybeUninit<u8>` buffer that
+        // socket2's typed datagram APIs require.
         let n = match Read::read(&mut &s, &mut buf) {
             Ok(n) => n,
             Err(e)
@@ -183,8 +228,7 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
         interval_sent += n * 8;
         total_bits += (n * 8) as u64;
 
-        if is_mcast
-            && n >= SEQ_LEN
+        if n >= SEQ_LEN
             && let Some(seq) = get_seq(&buf[..n])
         {
             let expected = next_expected.unwrap_or(seq);
