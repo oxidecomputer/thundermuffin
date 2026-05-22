@@ -26,7 +26,7 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
             let s =
                 Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
             if is_mcast {
-                s.set_multicast_ttl_v4(cli.ttl)
+                s.set_multicast_ttl_v4(u32::from(cli.ttl))
                     .context("set IP_MULTICAST_TTL")?;
                 s.set_multicast_loop_v4(cli.multicast_loop)
                     .context("set IP_MULTICAST_LOOP")?;
@@ -35,7 +35,7 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
                         .context("set IP_MULTICAST_IF")?;
                 }
             } else {
-                s.set_ttl_v4(cli.ttl).context("set IP_TTL")?;
+                s.set_ttl_v4(u32::from(cli.ttl)).context("set IP_TTL")?;
             }
             (s, SocketAddr::V4(sa))
         }
@@ -44,7 +44,7 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
             let s =
                 Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
             if is_mcast {
-                s.set_multicast_hops_v6(cli.ttl)
+                s.set_multicast_hops_v6(u32::from(cli.ttl))
                     .context("set IPV6_MULTICAST_HOPS")?;
                 s.set_multicast_loop_v6(cli.multicast_loop)
                     .context("set IPV6_MULTICAST_LOOP")?;
@@ -55,7 +55,7 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
                         .context("set IPV6_MULTICAST_IF")?;
                 }
             } else {
-                s.set_unicast_hops_v6(cli.ttl)
+                s.set_unicast_hops_v6(u32::from(cli.ttl))
                     .context("set IPV6_UNICAST_HOPS")?;
             }
             (s, SocketAddr::V6(sa))
@@ -194,6 +194,11 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
 
     let mut rx_count: u64 = 0;
     let mut loss_count: u64 = 0;
+    // `out_of_order_count` covers any datagram whose sequence is below the
+    // running high-water mark. With only a sequence prefix the receiver
+    // cannot distinguish a reordered delivery from a duplicate, so both
+    // land in this bucket.
+    let mut out_of_order_count: u64 = 0;
     let mut next_expected: Option<u64> = None;
     let mut total_bits: u64 = 0;
 
@@ -228,12 +233,18 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
         interval_sent += n * 8;
         total_bits += (n * 8) as u64;
 
+        // The sender's sequence is a `u64` counter starting at 0. At line
+        // rate that's hundreds of years to wrap, so the receiver makes no
+        // attempt to detect or compensate for wraparound. `wrapping_add` is
+        // used purely to avoid an overflow panic on adversarial inputs.
         if n >= SEQ_LEN
             && let Some(seq) = get_seq(&buf[..n])
         {
             let expected = next_expected.unwrap_or(seq);
             if seq > expected {
                 loss_count += seq - expected;
+            } else if seq < expected {
+                out_of_order_count += 1;
             }
             next_expected = Some(expected.max(seq.wrapping_add(1)));
         }
@@ -259,7 +270,9 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
 
     // Machine-readable summary so commtest can parse the result without
     // scraping `show_speed` output.
-    println!("{{\"rx\":{rx_count},\"loss\":{loss_count},\"bps\":{bps:.3}}}");
+    println!(
+        "{{\"rx\":{rx_count},\"loss\":{loss_count},\"out_of_order\":{out_of_order_count},\"bps\":{bps:.3}}}"
+    );
 
     if rx_count == 0 {
         anyhow::bail!("received zero datagrams");

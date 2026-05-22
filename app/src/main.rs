@@ -36,9 +36,10 @@ struct Cli {
 
     /// TTL (IPv4) or hop limit (IPv6) for outgoing datagrams. For multicast
     /// destinations this sets `IP_MULTICAST_TTL` / `IPV6_MULTICAST_HOPS`;
-    /// otherwise, it sets `IP_TTL` / `IPV6_UNICAST_HOPS`.
+    /// otherwise, it sets `IP_TTL` / `IPV6_UNICAST_HOPS`. The on-wire field
+    /// is 8 bits in both IPv4 and IPv6.
     #[arg(long, default_value_t = 64)]
-    ttl: u32,
+    ttl: u8,
 
     /// Enable `IP_MULTICAST_LOOP` / `IPV6_MULTICAST_LOOP`. Disabled by
     /// default to avoid the sender seeing its own traffic on hosts that
@@ -89,8 +90,7 @@ struct Server {
     listen: IpAddr,
 
     /// Wallclock duration (seconds) for UDP receivers. When unset the
-    /// receiver runs until interrupted, matching the prior behavior. TCP
-    /// servers ignore this field.
+    /// receiver runs until interrupted. TCP servers ignore this field.
     #[arg(short, long)]
     duration: Option<u64>,
 
