@@ -3,7 +3,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::net::IpAddr;
 
 mod tcp;
+mod tcp_async;
 mod udp;
+mod udp_async;
 mod util;
 
 /// A program to send muffins from one computer to another.
@@ -53,6 +55,10 @@ struct Client {
     /// values are in seconds. Data values are in buffer writes.
     #[arg(short, long, default_value_t = 10)]
     duration: u64,
+
+    /// Number of parallel client streams (TCP connections / UDP sockets).
+    #[arg(short = 'P', long, default_value_t = 1)]
+    parallel: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -65,6 +71,8 @@ struct Server {
 enum Transport {
     Tcp,
     Udp,
+    TcpAsync,
+    UdpAsync,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -84,5 +92,7 @@ fn main() -> Result<()> {
     match cli.transport {
         Transport::Tcp => tcp::run(&cli),
         Transport::Udp => udp::run(&cli),
+        Transport::TcpAsync => tcp_async::run(&cli),
+        Transport::UdpAsync => udp_async::run(&cli),
     }
 }
