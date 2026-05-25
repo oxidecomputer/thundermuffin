@@ -6,5 +6,6 @@ edition = "2021"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+mio.workspace = true
 socket2.workspace = true
 tokio.workspace = true

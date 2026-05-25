@@ -20,6 +20,7 @@ anyhow = "1.0.101"
 cargo_metadata = "0.18"
 clap = { version = "4.5.59", features = ["derive"] }
 indoc = "2"
+mio = { version = "1", features = ["os-poll", "net"] }
 socket2 = { version = "0.4.10", features = ["all"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
 toml = "0.8"

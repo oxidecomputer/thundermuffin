@@ -4,6 +4,7 @@ use std::net::IpAddr;
 
 mod tcp;
 mod tcp_async;
+mod tcp_threadpool;
 mod udp;
 mod udp_async;
 mod util;
@@ -73,6 +74,7 @@ enum Transport {
     Udp,
     TcpAsync,
     UdpAsync,
+    TcpThreadpool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -94,5 +96,6 @@ fn main() -> Result<()> {
         Transport::Udp => udp::run(&cli),
         Transport::TcpAsync => tcp_async::run(&cli),
         Transport::UdpAsync => udp_async::run(&cli),
+        Transport::TcpThreadpool => tcp_threadpool::run(&cli),
     }
 }
