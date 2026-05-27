@@ -87,7 +87,7 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
     };
 
     //TODO s.set_quickack(true)?;
-    s.set_nodelay(true)?;
+    s.set_tcp_nodelay(true)?;
     s.listen(cli.backlog)?;
 
     loop {

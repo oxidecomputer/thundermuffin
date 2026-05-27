@@ -1,9 +1,10 @@
 [package]
 name = "thundermuffin"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+libc.workspace = true
 socket2.workspace = true
