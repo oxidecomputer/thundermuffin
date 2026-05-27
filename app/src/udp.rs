@@ -3,12 +3,54 @@ use crate::util::{SEQ_LEN, buffer, get_seq, put_seq, show_speed};
 use crate::{Cli, Client, Participant, Server};
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::io::Read;
+use std::io::{self, Read};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
 };
 use std::num::NonZeroU32;
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
+
+/// `setsockopt` with a single-byte value. The IPv4 multicast options
+/// `IP_MULTICAST_TTL` and `IP_MULTICAST_LOOP` are specified by illumos as
+/// `uchar_t` and the kernel rejects 4-byte payloads with `EINVAL`.
+///
+/// socket2 (version 0.6) sets these via a `c_int`, so we drop to a raw
+/// `setsockopt` with the correct wire size.
+fn setsockopt_u8(
+    socket: &Socket,
+    level: libc::c_int,
+    name: libc::c_int,
+    value: u8,
+) -> io::Result<()> {
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            name,
+            std::ptr::from_ref(&value).cast::<libc::c_void>(),
+            std::mem::size_of::<u8>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn set_ip_multicast_ttl_v4(socket: &Socket, ttl: u8) -> io::Result<()> {
+    setsockopt_u8(socket, libc::IPPROTO_IP, libc::IP_MULTICAST_TTL, ttl)
+}
+
+fn set_ip_multicast_loop_v4(socket: &Socket, enable: bool) -> io::Result<()> {
+    setsockopt_u8(
+        socket,
+        libc::IPPROTO_IP,
+        libc::IP_MULTICAST_LOOP,
+        u8::from(enable),
+    )
+}
 
 pub(crate) fn run(cli: &Cli) -> Result<()> {
     match cli.kind {
@@ -26,9 +68,9 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
             let s =
                 Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
             if is_mcast {
-                s.set_multicast_ttl_v4(u32::from(cli.ttl))
+                set_ip_multicast_ttl_v4(&s, cli.ttl)
                     .context("set IP_MULTICAST_TTL")?;
-                s.set_multicast_loop_v4(cli.multicast_loop)
+                set_ip_multicast_loop_v4(&s, cli.multicast_loop)
                     .context("set IP_MULTICAST_LOOP")?;
                 if let Some(iface) = cli.multicast_iface {
                     s.set_multicast_if_v4(&iface)
@@ -115,8 +157,11 @@ fn join_v4(
             .context("IP_ADD_MEMBERSHIP");
     }
     for source in sources {
+        // socket2's `join_ssm_v4` signature is (source, group, interface).
+        // Swapping them lands the multicast address in `imr_sourceaddr` and
+        // the kernel rejects the join with `EINVAL`.
         socket
-            .join_ssm_v4(&group, source, &iface)
+            .join_ssm_v4(source, &group, &iface)
             .context("IP_ADD_SOURCE_MEMBERSHIP")?;
     }
     Ok(())
