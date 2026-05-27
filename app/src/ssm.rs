@@ -1,4 +1,5 @@
-//! Source-specific multicast (SSM) functionality that isn't covered by `socket2`.
+//! Source-specific multicast (SSM) support: group classification and joins
+//! not covered by `socket2`.
 //!
 //! `socket2` exposes `Socket::join_ssm_v4` for IPv4 SSM joins via
 //! `IP_ADD_SOURCE_MEMBERSHIP`, but has no IPv6 equivalent in any current
@@ -8,8 +9,29 @@
 //! [`setsourcefilter(3SOCKET)`]: https://illumos.org/man/3SOCKET/setsourcefilter
 
 use socket2::Socket;
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::os::fd::AsRawFd;
+
+/// Whether `addr` is in the source-specific multicast (SSM) range:
+/// `232.0.0.0/8` for IPv4 and `ff30::/12` for IPv6 (flags nibble `3`,
+/// referring to any scope), per [RFC 4607][rfc4607] §1. An SSM group builds no
+/// shared `(*, G)` tree, so it is reachable only through an INCLUDE-mode
+/// `(S, G)` join.
+///
+/// The ranges mirror Nexus's canonical `is_ssm_address`, so a probe's in-zone
+/// join classifies a group the same way the control plane does when it
+/// programs the group's forwarding tables.
+///
+/// [rfc4607]: https://datatracker.ietf.org/doc/html/rfc4607
+pub fn is_ssm_multicast(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => v4.octets()[0] == 232,
+        IpAddr::V6(v6) => {
+            let octets = v6.octets();
+            octets[0] == 0xff && octets[1] >> 4 == 0x3
+        }
+    }
+}
 
 // RFC 3678 / POSIX include-mode source filter. Standardized as `1` on every
 // platform that exposes `setsourcefilter`.
@@ -96,4 +118,28 @@ pub fn join_ssm_v6(
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssm_classification_matches_rfc4607_ranges() {
+        // IPv4: only 232.0.0.0/8 is SSM. The adjacent ASM and link-local
+        // ranges are not.
+        assert!(is_ssm_multicast("232.0.0.1".parse().unwrap()));
+        assert!(is_ssm_multicast("232.255.255.255".parse().unwrap()));
+        assert!(!is_ssm_multicast("231.255.255.255".parse().unwrap()));
+        assert!(!is_ssm_multicast("233.0.0.1".parse().unwrap()));
+        assert!(!is_ssm_multicast("239.1.2.3".parse().unwrap()));
+        assert!(!is_ssm_multicast("224.0.0.1".parse().unwrap()));
+
+        // IPv6: ff30::/12 (flags nibble 3) is SSM at every scope. Other
+        // multicast flag/scope combinations are not.
+        assert!(is_ssm_multicast("ff3e::1".parse().unwrap()));
+        assert!(is_ssm_multicast("ff35::1234".parse().unwrap()));
+        assert!(!is_ssm_multicast("ff0e::1".parse().unwrap()));
+        assert!(!is_ssm_multicast("ff02::1".parse().unwrap()));
+    }
 }

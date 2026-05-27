@@ -128,6 +128,29 @@ impl Server {
         cmd: &mut clap::Command,
     ) -> Result<(), clap::Error> {
         if self.multicast_source.is_empty() {
+            // An any-source (*, G) join on an SSM-range group receives no
+            // traffic. SSM defines no shared (*, G) tree: the host rules
+            // (RFC 4607 §4.1) reject a source-less join to an SSM destination,
+            // and Nexus only ever programs an SSM-range group as an (S, G)
+            // channel. The fabric forwards via a control-plane subscription
+            // rather than by snooping the guest's join, so a source-less join
+            // installs no usable reception state and yields a silent
+            // zero-delivery receive indistinguishable from a network
+            // regression.
+            //
+            // We reject it so that the mismatch surfaces as a CLI error.
+            if ssm::is_ssm_multicast(self.listen) {
+                return Err(cmd.error(
+                    ErrorKind::MissingRequiredArgument,
+                    format!(
+                        "`listen` {} is in the source-specific multicast (SSM) \
+                         range (232.0.0.0/8, ff30::/12) but no sources were \
+                         supplied; an any-source join is undeliverable. Pass \
+                         `--multicast-source` for an INCLUDE-mode (S, G) join",
+                        self.listen
+                    ),
+                ));
+            }
             return Ok(());
         }
         if !self.listen.is_multicast() {
