@@ -18,7 +18,6 @@
   <property_group name='config' type='application'>
      <propval name='port' type='count' value='4747' />
      <propval name='multicast_iface' type='astring' value='' />
-     <propval name='ipv6_scope' type='count' value='0' />
      <property name='multicast_group' type='astring' />
    </property_group>
 

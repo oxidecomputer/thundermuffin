@@ -13,8 +13,9 @@ use std::net::{IpAddr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 
 /// Whether `addr` is in the source-specific multicast (SSM) range:
-/// `232.0.0.0/8` for IPv4 and `ff30::/12` for IPv6 (flags nibble `3`,
-/// referring to any scope), per [RFC 4607][rfc4607] §1. An SSM group builds no
+/// `232.0.0.0/8` for IPv4, per [RFC 4607][rfc4607] §1, and `ff30::/12`
+/// for IPv6 (any address with flags nibble `3`). The IPv6 range is a
+/// superset of the RFC's `ff3x::/32` blocks. An SSM group builds no
 /// shared `(*, G)` tree, so it is reachable only through an INCLUDE-mode
 /// `(S, G)` join.
 ///
@@ -23,6 +24,9 @@ use std::os::fd::AsRawFd;
 /// programs the group's forwarding tables.
 ///
 /// [rfc4607]: https://datatracker.ietf.org/doc/html/rfc4607
+// TODO: move SSM classification into oxnet alongside a multicast address
+// type, so this crate, Nexus's `is_ssm_address`, and other consumers share
+// one implementation.
 pub fn is_ssm_multicast(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => v4.octets()[0] == 232,
@@ -125,7 +129,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ssm_classification_matches_rfc4607_ranges() {
+    fn ssm_classification_matches_nexus_ranges() {
         // IPv4: only 232.0.0.0/8 is SSM. The adjacent ASM and link-local
         // ranges are not.
         assert!(is_ssm_multicast("232.0.0.1".parse().unwrap()));
@@ -135,8 +139,9 @@ mod tests {
         assert!(!is_ssm_multicast("239.1.2.3".parse().unwrap()));
         assert!(!is_ssm_multicast("224.0.0.1".parse().unwrap()));
 
-        // IPv6: ff30::/12 (flags nibble 3) is SSM at every scope. Other
-        // multicast flag/scope combinations are not.
+        // IPv6: ff30::/12 (flags nibble 3) classifies as SSM at every
+        // scope, matching Nexus's superset of the RFC 4607 ff3x::/32
+        // blocks. Other multicast flag/scope combinations are not.
         assert!(is_ssm_multicast("ff3e::1".parse().unwrap()));
         assert!(is_ssm_multicast("ff35::1234".parse().unwrap()));
         assert!(!is_ssm_multicast("ff0e::1".parse().unwrap()));

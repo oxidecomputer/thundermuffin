@@ -52,6 +52,21 @@ fn set_ip_multicast_loop_v4(socket: &Socket, enable: bool) -> io::Result<()> {
     )
 }
 
+/// The `sin6_scope_id` to use for a multicast `group` pinned to `ifindex`.
+///
+/// Scope identifiers disambiguate link-scoped addresses (RFC 4007), so
+/// only interface-local (`ffx1::`) and link-local (`ffx2::`) groups carry
+/// the ifindex in the socket address. Wider-scope groups are already
+/// pinned by `IPV6_MULTICAST_IF` or the join, and the kernel may reject a
+/// nonzero scope on them, so the scope stays 0.
+fn v6_multicast_scope_id(group: Ipv6Addr, ifindex: u32) -> u32 {
+    if matches!(group.segments()[0] & 0x000f, 1 | 2) {
+        ifindex
+    } else {
+        0
+    }
+}
+
 pub(crate) fn run(cli: &Cli) -> Result<()> {
     match cli.kind {
         Participant::Client(ref client) => run_client(cli, client),
@@ -72,8 +87,8 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
                     .context("set IP_MULTICAST_TTL")?;
                 set_ip_multicast_loop_v4(&s, cli.multicast_loop)
                     .context("set IP_MULTICAST_LOOP")?;
-                if let Some(iface) = cli.multicast_iface {
-                    s.set_multicast_if_v4(&iface)
+                if let Some(iface) = &cli.multicast_iface {
+                    s.set_multicast_if_v4(&iface.v4_addr()?)
                         .context("set IP_MULTICAST_IF")?;
                 }
             } else {
@@ -82,24 +97,30 @@ fn run_client(cli: &Cli, client: &Client) -> Result<()> {
             (s, SocketAddr::V4(sa))
         }
         IpAddr::V6(addr) => {
-            let sa = SocketAddrV6::new(addr, cli.port, 0, cli.scope);
             let s =
                 Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-            if is_mcast {
+            let scope_id = if is_mcast {
                 s.set_multicast_hops_v6(u32::from(cli.ttl))
                     .context("set IPV6_MULTICAST_HOPS")?;
                 s.set_multicast_loop_v6(cli.multicast_loop)
                     .context("set IPV6_MULTICAST_LOOP")?;
+                let ifindex = match &cli.multicast_iface {
+                    Some(iface) => iface.index()?,
+                    None => 0,
+                };
                 // ifindex 0 means "kernel picks". Cross-platform behavior of
                 // explicit 0 is inconsistent, so skip the call entirely.
-                if let Some(idx) = NonZeroU32::new(cli.scope) {
+                if let Some(idx) = NonZeroU32::new(ifindex) {
                     s.set_multicast_if_v6(idx.get())
                         .context("set IPV6_MULTICAST_IF")?;
                 }
+                v6_multicast_scope_id(addr, ifindex)
             } else {
                 s.set_unicast_hops_v6(u32::from(cli.ttl))
                     .context("set IPV6_UNICAST_HOPS")?;
-            }
+                cli.scope
+            };
+            let sa = SocketAddrV6::new(addr, cli.port, 0, scope_id);
             (s, SocketAddr::V6(sa))
         }
     };
@@ -203,8 +224,10 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
             }
             s.bind(&sa.into())?;
             if is_mcast {
-                let iface =
-                    cli.multicast_iface.unwrap_or(Ipv4Addr::UNSPECIFIED);
+                let iface = match &cli.multicast_iface {
+                    Some(iface) => iface.v4_addr()?,
+                    None => Ipv4Addr::UNSPECIFIED,
+                };
                 join_v4(&s, addr, iface, &server.multicast_source_v4())?;
             }
             s
@@ -212,13 +235,29 @@ fn run_server(cli: &Cli, server: &Server) -> Result<()> {
         IpAddr::V6(addr) => {
             let s =
                 Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-            let sa = SocketAddrV6::new(addr, cli.port, 0, cli.scope);
+
+            let ifindex = if is_mcast {
+                match &cli.multicast_iface {
+                    Some(iface) => iface.index()?,
+                    None => 0,
+                }
+            } else {
+                0
+            };
+
+            let scope_id = if is_mcast {
+                v6_multicast_scope_id(addr, ifindex)
+            } else {
+                cli.scope
+            };
+
+            let sa = SocketAddrV6::new(addr, cli.port, 0, scope_id);
             if is_mcast {
                 s.set_reuse_address(true).context("SO_REUSEADDR")?;
             }
             s.bind(&sa.into())?;
             if is_mcast {
-                join_v6(&s, addr, cli.scope, &server.multicast_source_v6())?;
+                join_v6(&s, addr, ifindex, &server.multicast_source_v6())?;
             }
             s
         }

@@ -8,8 +8,11 @@
 # the kernel's IGMP/MLD membership for that group established on the pinned
 # interface. The illumos IP stack accepts (and answers ICMP echo for) only
 # locally joined groups, so the joiners supply the membership state the
-# zone's stack needs to accept group traffic. Forwarding to the port is
-# programmed separately by the control plane.
+# zone's stack needs to accept group traffic. Switch-side replication of
+# group traffic to the zone's underlay port is programmed separately. Nexus
+# creates the groups in DPD (Dendrite's data-plane daemon), and ddmd programs
+# the per-port replication members from DDM peer subscriptions (RFD 488). The
+# joiners only manage the host-local membership.
 #
 # This must run inside the zone: IGMP/MLD membership is per-netstack state,
 # and a zone with an exclusive IP stack cannot receive it from outside. The
@@ -33,17 +36,18 @@ if [[ ! -x "$BIN" ]]; then
     exit 1
 fi
 
-port=$(svcprop -c -p config/port "${SMF_FMRI}")
-
-# IPv4 address bound to the interface the joins should be pinned to (the
-# probe's overlay port). For multicast this becomes IP_MULTICAST_IF and, for
-# SSM, pins the source-specific membership to that interface.
-#
-# Note: this may be unset.
-iface=$(svcprop -c -p config/multicast_iface "${SMF_FMRI}" 2>/dev/null || true)
-if [[ "$iface" == '""' ]]; then
-    iface=""
-fi
+# Read an optional property, normalizing svcprop's representation of
+# "nothing there" to an empty string. svcprop -c quotes astring values, so
+# an empty value is emitted as a literal pair of double quotes. An unset
+# property makes svcprop fail entirely. Both cases collapse to "".
+svcprop_optional() {
+    local value
+    value=$(svcprop -c -p "$1" "${SMF_FMRI}" 2>/dev/null) || value=""
+    if [[ "$value" == '""' ]]; then
+        value=""
+    fi
+    printf '%s' "$value"
+}
 
 # Multi-valued list of multicast groups to join and hold open. The illumos IP
 # stack only accepts (and only answers ICMP echo for) a group the interface
@@ -51,24 +55,7 @@ fi
 # long-lived membership to respond to reachability probes. Forwarding to the
 # port is programmed statically by the control plane, as this is solely the
 # host-local membership gate.
-groups=$(svcprop -c -p config/multicast_group "${SMF_FMRI}" 2>/dev/null || true)
-if [[ "$groups" == '""' ]]; then
-    groups=""
-fi
-
-# Interface index (ifindex) the IPv6 joins should be pinned to. IPv6 has no
-# address-based IP_MULTICAST_IF equivalent, so the binary takes a numeric
-# `--scope` instead (IPV6_MULTICAST_IF, and the SSM join interface). A value
-# of 0 means kernel-selected and is the binary's default, so it is elided.
-ipv6_scope=$(svcprop -c -p config/ipv6_scope "${SMF_FMRI}" 2>/dev/null || echo 0)
-
-iface_args=()
-if [[ -n "$iface" ]]; then
-    iface_args=(--multicast-iface "$iface")
-fi
-if [[ "$ipv6_scope" != 0 ]]; then
-    iface_args+=(--scope "$ipv6_scope")
-fi
+groups=$(svcprop_optional config/multicast_group)
 
 if [[ -z "$groups" ]]; then
     # No groups configured. Stay online but idle so the service does not
@@ -76,6 +63,23 @@ if [[ -z "$groups" ]]; then
     # membership changes.
     echo "no multicast groups configured; idling" >&2
     exec sleep infinity
+fi
+
+# svc.startd sets SMF_FMRI in every method's environment, see smf_method(7)
+# and svc.startd(8).
+port=$(svcprop -c -p config/port "${SMF_FMRI}")
+
+# Interface the joins should be pinned to (the probe's overlay port), as an
+# interface name or an IP address bound to it. The binary resolves it per
+# group family: the interface's IPv4 address for IP_MULTICAST_IF and the
+# IPv4 joins, its ifindex for IPV6_MULTICAST_IF and the IPv6 joins.
+#
+# Note: this may be unset.
+iface=$(svcprop_optional config/multicast_iface)
+
+iface_args=()
+if [[ -n "$iface" ]]; then
+    iface_args=(--multicast-iface "$iface")
 fi
 
 # Spawn one joiner per group.

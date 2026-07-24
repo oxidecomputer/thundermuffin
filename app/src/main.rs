@@ -8,6 +8,8 @@ mod tcp;
 mod udp;
 mod util;
 
+use util::InterfaceSelector;
+
 /// A program to send muffins from one computer to another.
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -20,9 +22,8 @@ struct Cli {
     #[arg(short, long, default_value_t = 4747)]
     port: u16,
 
-    /// Scope (zone index) to use for IPv6 targets. Also used as the outgoing
-    /// `IPV6_MULTICAST_IF` interface index when the destination/listen address
-    /// is an IPv6 multicast address.
+    /// Scope (zone index) to use for IPv6 unicast targets. For multicast
+    /// use `--multicast-iface` instead.
     #[arg(short, long, default_value_t = 0)]
     scope: u32,
 
@@ -47,13 +48,18 @@ struct Cli {
     #[arg(long)]
     multicast_loop: bool,
 
-    /// Outgoing `IP_MULTICAST_IF` for IPv4 multicast, expressed as the
-    /// IPv4 address bound to the desired interface. For IPv6 use
-    /// `--scope` (numeric ifindex) instead. When omitted the kernel selects
-    /// the interface from its routing table, which may surprise on
-    /// multi-homed hosts.
+    /// Interface to pin multicast traffic to.
+    ///
+    /// This accepts either an interface name (e.g. `net0`) or an IP address
+    /// bound to the interface. The group's address family selects what the
+    /// selector resolves to: the interface's IPv4 address for `IP_MULTICAST_IF`
+    /// and the IPv4 joins, or its interface index for `IPV6_MULTICAST_IF`, the
+    /// IPv6 joins, and, for interface- and link-local groups, the bind
+    /// scope. When omitted the kernel selects the
+    /// interface from its routing table, which may not choose the intended
+    /// interface on hosts with multiple network interfaces.
     #[arg(long)]
-    multicast_iface: Option<Ipv4Addr>,
+    multicast_iface: Option<InterfaceSelector>,
 
     #[command(subcommand)]
     kind: Participant,
@@ -86,7 +92,7 @@ struct Server {
     /// IP address to listen on. When this is a multicast address the
     /// receiver binds directly to the group on `--port`, sets `SO_REUSEADDR`
     /// (so multiple receivers can co-bind), and joins the group on the
-    /// interface selected by `--multicast-iface` (IPv4) or `--scope` (IPv6).
+    /// interface selected by `--multicast-iface`.
     listen: IpAddr,
 
     /// Wallclock duration (seconds) for UDP receivers. When unset the
@@ -175,24 +181,19 @@ impl Server {
                 ));
             }
         }
-        // SSM joins must be pinned to a specific interface. With
+        // SSM joins must be pinned to a specific interface. With a
         // kernel-picked interface (`INADDR_ANY` for v4, `ifindex = 0` for
         // v6) the join can silently land on an interface where the source
         // isn't reachable and deliver no traffic, which looks identical
         // to a real network regression in CI.
-        match self.listen {
-            IpAddr::V4(_) if cli.multicast_iface.is_none() => Err(cmd.error(
+        if cli.multicast_iface.is_none() {
+            return Err(cmd.error(
                 ErrorKind::MissingRequiredArgument,
-                "`--multicast-source` (IPv4) requires `--multicast-iface` \
-                     to pin the SSM join to a specific interface",
-            )),
-            IpAddr::V6(_) if cli.scope == 0 => Err(cmd.error(
-                ErrorKind::MissingRequiredArgument,
-                "`--multicast-source` (IPv6) requires non-zero `--scope` \
-                 (interface index) to pin the SSM join to a specific interface",
-            )),
-            _ => Ok(()),
+                "`--multicast-source` requires `--multicast-iface` to pin \
+                 the SSM join to a specific interface",
+            ));
         }
+        Ok(())
     }
 
     /// IPv4 SSM sources. `validate` guarantees that, when `listen` is v4
