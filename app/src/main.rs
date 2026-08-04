@@ -8,6 +8,8 @@ mod tcp;
 mod udp;
 mod util;
 
+use util::InterfaceSelector;
+
 /// A program to send muffins from one computer to another.
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -20,9 +22,8 @@ struct Cli {
     #[arg(short, long, default_value_t = 4747)]
     port: u16,
 
-    /// Scope (zone index) to use for IPv6 targets. Also used as the outgoing
-    /// `IPV6_MULTICAST_IF` interface index when the destination/listen address
-    /// is an IPv6 multicast address.
+    /// Scope (zone index) to use for IPv6 unicast targets. For multicast
+    /// use `--multicast-iface` instead.
     #[arg(short, long, default_value_t = 0)]
     scope: u32,
 
@@ -47,13 +48,18 @@ struct Cli {
     #[arg(long)]
     multicast_loop: bool,
 
-    /// Outgoing `IP_MULTICAST_IF` for IPv4 multicast, expressed as the
-    /// IPv4 address bound to the desired interface. For IPv6 use
-    /// `--scope` (numeric ifindex) instead. When omitted the kernel selects
-    /// the interface from its routing table, which may surprise on
-    /// multi-homed hosts.
+    /// Interface to pin multicast traffic to.
+    ///
+    /// This accepts either an interface name (e.g. `net0`) or an IP address
+    /// bound to the interface. The group's address family selects what the
+    /// selector resolves to: the interface's IPv4 address for `IP_MULTICAST_IF`
+    /// and the IPv4 joins, or its interface index for `IPV6_MULTICAST_IF`, the
+    /// IPv6 joins, and, for interface- and link-local groups, the bind
+    /// scope. When omitted the kernel selects the
+    /// interface from its routing table, which may not choose the intended
+    /// interface on hosts with multiple network interfaces.
     #[arg(long)]
-    multicast_iface: Option<Ipv4Addr>,
+    multicast_iface: Option<InterfaceSelector>,
 
     #[command(subcommand)]
     kind: Participant,
@@ -86,7 +92,7 @@ struct Server {
     /// IP address to listen on. When this is a multicast address the
     /// receiver binds directly to the group on `--port`, sets `SO_REUSEADDR`
     /// (so multiple receivers can co-bind), and joins the group on the
-    /// interface selected by `--multicast-iface` (IPv4) or `--scope` (IPv6).
+    /// interface selected by `--multicast-iface`.
     listen: IpAddr,
 
     /// Wallclock duration (seconds) for UDP receivers. When unset the
@@ -109,14 +115,28 @@ struct Server {
 }
 
 /// Reject obviously-non-unicast addresses (multicast, unspecified, loopback)
-/// at clap parse time so SSM misconfiguration surfaces as a CLI error rather
-/// than an opaque kernel `EADDRNOTAVAIL` after socket setup.
+/// and non-routable sources (broadcast, link-local) at clap parse time so SSM
+/// misconfiguration surfaces as a CLI error rather than an opaque kernel
+/// `EADDRNOTAVAIL` after socket setup.
+///
+/// This matches the source checks Dendrite applies at group creation
+/// (i.e., `dpd/src/mcast/validate.rs`).
 fn parse_unicast_ipaddr(s: &str) -> Result<IpAddr, String> {
     let addr: IpAddr = s
         .parse()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
     if addr.is_multicast() || addr.is_unspecified() || addr.is_loopback() {
         return Err(format!("must be a unicast address (got `{addr}`)"));
+    }
+    let non_routable = match addr {
+        IpAddr::V4(v4) => v4.is_broadcast() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_unicast_link_local(),
+    };
+    if non_routable {
+        return Err(format!(
+            "must be a routable source address, not broadcast or link-local \
+             (got `{addr}`)"
+        ));
     }
     Ok(addr)
 }
@@ -127,7 +147,39 @@ impl Server {
         cli: &Cli,
         cmd: &mut clap::Command,
     ) -> Result<(), clap::Error> {
+        // Match the control plane's admission rules for SSM destinations
+        // (reserved 232.0.0.0/24, non-allocatable IPv6 group IDs, unusable
+        // scopes). The rack never programs such a group, so a join would
+        // yield a silent zero-delivery reception.
+        if ssm::is_ssm_multicast(self.listen)
+            && let Err(msg) = ssm::validate_ssm_destination(self.listen)
+        {
+            return Err(cmd.error(ErrorKind::ValueValidation, msg));
+        }
         if self.multicast_source.is_empty() {
+            // An any-source (*, G) join on an SSM-range group receives no
+            // traffic. SSM defines no shared (*, G) tree: the host rules
+            // (RFC 4607 §4.1) reject a source-less join to an SSM destination,
+            // and Nexus only ever programs an SSM-range group as an (S, G)
+            // channel. The fabric forwards via a control-plane subscription
+            // rather than by snooping the guest's join, so a source-less join
+            // installs no usable reception state and yields a silent
+            // zero-delivery receive indistinguishable from a network
+            // regression.
+            //
+            // We reject it so that the mismatch surfaces as a CLI error.
+            if ssm::is_ssm_multicast(self.listen) {
+                return Err(cmd.error(
+                    ErrorKind::MissingRequiredArgument,
+                    format!(
+                        "`listen` {} is in the source-specific multicast (SSM) \
+                         range (232.0.0.0/8, ff3x::/32) but no sources were \
+                         supplied; an any-source join is undeliverable. Pass \
+                         `--multicast-source` for an INCLUDE-mode (S, G) join",
+                        self.listen
+                    ),
+                ));
+            }
             return Ok(());
         }
         if !self.listen.is_multicast() {
@@ -152,24 +204,19 @@ impl Server {
                 ));
             }
         }
-        // SSM joins must be pinned to a specific interface. With
+        // SSM joins must be pinned to a specific interface. With a
         // kernel-picked interface (`INADDR_ANY` for v4, `ifindex = 0` for
         // v6) the join can silently land on an interface where the source
         // isn't reachable and deliver no traffic, which looks identical
         // to a real network regression in CI.
-        match self.listen {
-            IpAddr::V4(_) if cli.multicast_iface.is_none() => Err(cmd.error(
+        if cli.multicast_iface.is_none() {
+            return Err(cmd.error(
                 ErrorKind::MissingRequiredArgument,
-                "`--multicast-source` (IPv4) requires `--multicast-iface` \
-                     to pin the SSM join to a specific interface",
-            )),
-            IpAddr::V6(_) if cli.scope == 0 => Err(cmd.error(
-                ErrorKind::MissingRequiredArgument,
-                "`--multicast-source` (IPv6) requires non-zero `--scope` \
-                 (interface index) to pin the SSM join to a specific interface",
-            )),
-            _ => Ok(()),
+                "`--multicast-source` requires `--multicast-iface` to pin \
+                 the SSM join to a specific interface",
+            ));
         }
+        Ok(())
     }
 
     /// IPv4 SSM sources. `validate` guarantees that, when `listen` is v4
