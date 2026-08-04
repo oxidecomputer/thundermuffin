@@ -115,14 +115,28 @@ struct Server {
 }
 
 /// Reject obviously-non-unicast addresses (multicast, unspecified, loopback)
-/// at clap parse time so SSM misconfiguration surfaces as a CLI error rather
-/// than an opaque kernel `EADDRNOTAVAIL` after socket setup.
+/// and non-routable sources (broadcast, link-local) at clap parse time so SSM
+/// misconfiguration surfaces as a CLI error rather than an opaque kernel
+/// `EADDRNOTAVAIL` after socket setup.
+///
+/// This matches the source checks Dendrite applies at group creation
+/// (i.e., `dpd/src/mcast/validate.rs`).
 fn parse_unicast_ipaddr(s: &str) -> Result<IpAddr, String> {
     let addr: IpAddr = s
         .parse()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
     if addr.is_multicast() || addr.is_unspecified() || addr.is_loopback() {
         return Err(format!("must be a unicast address (got `{addr}`)"));
+    }
+    let non_routable = match addr {
+        IpAddr::V4(v4) => v4.is_broadcast() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_unicast_link_local(),
+    };
+    if non_routable {
+        return Err(format!(
+            "must be a routable source address, not broadcast or link-local \
+             (got `{addr}`)"
+        ));
     }
     Ok(addr)
 }
@@ -133,6 +147,15 @@ impl Server {
         cli: &Cli,
         cmd: &mut clap::Command,
     ) -> Result<(), clap::Error> {
+        // Match the control plane's admission rules for SSM destinations
+        // (reserved 232.0.0.0/24, non-allocatable IPv6 group IDs, unusable
+        // scopes). The rack never programs such a group, so a join would
+        // yield a silent zero-delivery reception.
+        if ssm::is_ssm_multicast(self.listen)
+            && let Err(msg) = ssm::validate_ssm_destination(self.listen)
+        {
+            return Err(cmd.error(ErrorKind::ValueValidation, msg));
+        }
         if self.multicast_source.is_empty() {
             // An any-source (*, G) join on an SSM-range group receives no
             // traffic. SSM defines no shared (*, G) tree: the host rules
@@ -150,7 +173,7 @@ impl Server {
                     ErrorKind::MissingRequiredArgument,
                     format!(
                         "`listen` {} is in the source-specific multicast (SSM) \
-                         range (232.0.0.0/8, ff30::/12) but no sources were \
+                         range (232.0.0.0/8, ff3x::/32) but no sources were \
                          supplied; an any-source join is undeliverable. Pass \
                          `--multicast-source` for an INCLUDE-mode (S, G) join",
                         self.listen
