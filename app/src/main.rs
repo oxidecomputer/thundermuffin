@@ -8,6 +8,8 @@ mod tcp;
 mod udp;
 mod util;
 
+use util::InterfaceSelector;
+
 /// A program to send muffins from one computer to another.
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -20,9 +22,8 @@ struct Cli {
     #[arg(short, long, default_value_t = 4747)]
     port: u16,
 
-    /// Scope (zone index) to use for IPv6 targets. Also used as the outgoing
-    /// `IPV6_MULTICAST_IF` interface index when the destination/listen address
-    /// is an IPv6 multicast address.
+    /// Scope (zone index) to use for IPv6 unicast targets. For multicast
+    /// use `--multicast-iface` instead.
     #[arg(short, long, default_value_t = 0)]
     scope: u32,
 
@@ -47,13 +48,19 @@ struct Cli {
     #[arg(long)]
     multicast_loop: bool,
 
-    /// Outgoing `IP_MULTICAST_IF` for IPv4 multicast, expressed as the
-    /// IPv4 address bound to the desired interface. For IPv6 use
-    /// `--scope` (numeric ifindex) instead. When omitted the kernel selects
-    /// the interface from its routing table, which may surprise on
-    /// multi-homed hosts.
+    /// Interface to pin multicast traffic to.
+    ///
+    /// This accepts either an interface name (e.g. `net0`) or an IP address
+    /// bound to the interface. The group's address family selects what the
+    /// selector resolves to: the interface's IPv4 address for `IP_MULTICAST_IF`
+    /// and the IPv4 joins, or its interface index for `IPV6_MULTICAST_IF`, the
+    /// IPv6 joins, and, for interface- and link-local groups, the bind
+    /// scope.
+    ///
+    /// If omitted, the kernel picks an interface from its routing table. On a
+    /// host with more than one, it may not pick the intended one.
     #[arg(long)]
-    multicast_iface: Option<Ipv4Addr>,
+    multicast_iface: Option<InterfaceSelector>,
 
     #[command(subcommand)]
     kind: Participant,
@@ -86,7 +93,7 @@ struct Server {
     /// IP address to listen on. When this is a multicast address the
     /// receiver binds directly to the group on `--port`, sets `SO_REUSEADDR`
     /// (so multiple receivers can co-bind), and joins the group on the
-    /// interface selected by `--multicast-iface` (IPv4) or `--scope` (IPv6).
+    /// interface selected by `--multicast-iface`.
     listen: IpAddr,
 
     /// Wallclock duration (seconds) for UDP receivers. When unset the
@@ -108,9 +115,16 @@ struct Server {
     multicast_source: Vec<IpAddr>,
 }
 
-/// Reject obviously-non-unicast addresses (multicast, unspecified, loopback)
-/// at clap parse time so SSM misconfiguration surfaces as a CLI error rather
-/// than an opaque kernel `EADDRNOTAVAIL` after socket setup.
+/// Parse an SSM source, rejecting addresses that can't send forwarded
+/// traffic: multicast, unspecified, loopback, broadcast, link-local,
+/// `0.0.0.0/8` ([RFC 1122] §3.2.1.3), `240.0.0.0/4` ([RFC 1112] §4), and
+/// IPv4-mapped/compatible IPv6 ([RFC 4291] §2.5.5).
+///
+/// Checking at parse time lets clap reject bad sources up front.
+///
+/// [RFC 1112]: https://www.rfc-editor.org/rfc/rfc1112.html
+/// [RFC 1122]: https://www.rfc-editor.org/rfc/rfc1122.html
+/// [RFC 4291]: https://www.rfc-editor.org/rfc/rfc4291.html
 fn parse_unicast_ipaddr(s: &str) -> Result<IpAddr, String> {
     let addr: IpAddr = s
         .parse()
@@ -118,7 +132,32 @@ fn parse_unicast_ipaddr(s: &str) -> Result<IpAddr, String> {
     if addr.is_multicast() || addr.is_unspecified() || addr.is_loopback() {
         return Err(format!("must be a unicast address (got `{addr}`)"));
     }
-    Ok(addr)
+
+    let reason = match addr {
+        IpAddr::V4(v4) => match v4.octets() {
+            [255, 255, 255, 255] => Some("broadcast"),
+            [169, 254, ..] => Some("link-local"),
+            [0, ..] => Some("in 0.0.0.0/8 (RFC 1122 §3.2.1.3)"),
+            [240..=255, ..] => Some("in reserved 240.0.0.0/4 (RFC 1112 §4)"),
+            _ => None,
+        },
+        IpAddr::V6(v6) => match v6.segments() {
+            [0xfe80..=0xfebf, ..] => Some("link-local"),
+            [0, 0, 0, 0, 0, 0xffff, ..] => {
+                Some("IPv4-mapped (RFC 4291 §2.5.5.2)")
+            }
+            [0, 0, 0, 0, 0, 0, ..] => {
+                Some("IPv4-compatible (RFC 4291 §2.5.5.1)")
+            }
+            _ => None,
+        },
+    };
+    match reason {
+        Some(reason) => Err(format!(
+            "must be a routable source address, not {reason} (got `{addr}`)"
+        )),
+        None => Ok(addr),
+    }
 }
 
 impl Server {
@@ -127,7 +166,38 @@ impl Server {
         cli: &Cli,
         cmd: &mut clap::Command,
     ) -> Result<(), clap::Error> {
+        // A join to an SSM null address or a non-forwardable scope receives
+        // no packets.
+        let is_ssm = ssm::is_ssm_multicast(self.listen);
+        if is_ssm && let Err(msg) = ssm::validate_ssm_destination(self.listen) {
+            return Err(cmd.error(ErrorKind::ValueValidation, msg));
+        }
         if self.multicast_source.is_empty() {
+            // An any-source (*, G) join on an SSM-range group receives no
+            // traffic. SSM defines no shared (*, G) tree: the host rules
+            // (RFC 4607 §4.1) reject a source-less join to an SSM destination,
+            // and Nexus only ever programs an SSM-range group as an (S, G)
+            // channel.
+            //
+            // The switch and OPTE forward from state the control plane
+            // programs, and neither snoops the guest's join. A source-less
+            // join installs nothing usable, and the run delivers zero
+            // packets, which could look like a network regression.
+            //
+            // We reject it so that the mismatch surfaces as a CLI error.
+            if is_ssm {
+                return Err(cmd.error(
+                    ErrorKind::MissingRequiredArgument,
+                    format!(
+                        "`listen` {} is in the source-specific multicast (SSM) \
+                         range (232.0.0.0/8, ff3x::/32, ffbx::/32) but no \
+                         sources were \
+                         supplied; an any-source join is undeliverable. Pass \
+                         `--multicast-source` for an INCLUDE-mode (S, G) join",
+                        self.listen
+                    ),
+                ));
+            }
             return Ok(());
         }
         if !self.listen.is_multicast() {
@@ -152,24 +222,19 @@ impl Server {
                 ));
             }
         }
-        // SSM joins must be pinned to a specific interface. With
+        // SSM joins must be pinned to a specific interface. With a
         // kernel-picked interface (`INADDR_ANY` for v4, `ifindex = 0` for
         // v6) the join can silently land on an interface where the source
         // isn't reachable and deliver no traffic, which looks identical
         // to a real network regression in CI.
-        match self.listen {
-            IpAddr::V4(_) if cli.multicast_iface.is_none() => Err(cmd.error(
+        if cli.multicast_iface.is_none() {
+            return Err(cmd.error(
                 ErrorKind::MissingRequiredArgument,
-                "`--multicast-source` (IPv4) requires `--multicast-iface` \
-                     to pin the SSM join to a specific interface",
-            )),
-            IpAddr::V6(_) if cli.scope == 0 => Err(cmd.error(
-                ErrorKind::MissingRequiredArgument,
-                "`--multicast-source` (IPv6) requires non-zero `--scope` \
-                 (interface index) to pin the SSM join to a specific interface",
-            )),
-            _ => Ok(()),
+                "`--multicast-source` requires `--multicast-iface` to pin \
+                 the SSM join to a specific interface",
+            ));
         }
+        Ok(())
     }
 
     /// IPv4 SSM sources. `validate` guarantees that, when `listen` is v4
@@ -241,5 +306,53 @@ fn main() -> Result<()> {
     match cli.transport {
         Transport::Tcp => tcp::run(&cli),
         Transport::Udp => udp::run(&cli),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_unicast_ipaddr_accepts_routable_unicast() {
+        for accepted in [
+            "10.0.0.1",
+            "100.64.0.1",
+            "192.0.2.1",
+            "2001:db8::1",
+            "fd00::1",
+        ] {
+            assert_eq!(
+                parse_unicast_ipaddr(accepted),
+                Ok(accepted.parse().unwrap()),
+                "{accepted} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_unicast_ipaddr_rejects_unusable_sources() {
+        for (rejected, reason) in [
+            ("239.1.1.1", "must be a unicast address"),
+            ("ff3e::8000:1", "must be a unicast address"),
+            ("0.0.0.0", "must be a unicast address"),
+            ("::", "must be a unicast address"),
+            ("127.0.0.1", "must be a unicast address"),
+            ("::1", "must be a unicast address"),
+            ("255.255.255.255", "broadcast"),
+            ("169.254.1.1", "link-local"),
+            ("fe80::1", "link-local"),
+            ("0.1.2.3", "0.0.0.0/8"),
+            ("240.0.0.1", "240.0.0.0/4"),
+            ("::ffff:192.0.2.1", "IPv4-mapped"),
+            ("::192.0.2.1", "IPv4-compatible"),
+        ] {
+            let error = parse_unicast_ipaddr(rejected)
+                .expect_err(&format!("{rejected} should be rejected"));
+            assert!(
+                error.contains(reason),
+                "{rejected} rejected for the wrong reason: {error}"
+            );
+        }
     }
 }

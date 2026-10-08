@@ -11,12 +11,14 @@
   </dependency>
 
   <exec_method type='method' name='start'
-    exec='ctrun -l child -o noorphan,regent /opt/oxide/thundermuffin/pkg/mgd_method_script.sh &amp;'
+    exec='ctrun -l child -o noorphan,regent /opt/oxide/thundermuffin/pkg/method_script.sh &amp;'
     timeout_seconds='0' />
   <exec_method type='method' name='stop' exec=':kill' timeout_seconds='0' />
 
   <property_group name='config' type='application'>
      <propval name='port' type='count' value='4747' />
+     <propval name='multicast_iface' type='astring' value='' />
+     <property name='multicast_group' type='astring' />
    </property_group>
 
   <property_group name='startd' type='framework'>
