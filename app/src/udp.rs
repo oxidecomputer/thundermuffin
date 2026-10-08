@@ -54,11 +54,11 @@ fn set_ip_multicast_loop_v4(socket: &Socket, enable: bool) -> io::Result<()> {
 
 /// The `sin6_scope_id` to use for a multicast `group` pinned to `ifindex`.
 ///
-/// Scope identifiers disambiguate link-scoped addresses (RFC 4007), so
-/// only interface-local (`ffx1::`) and link-local (`ffx2::`) groups carry
-/// the ifindex in the socket address. Wider-scope groups are already
-/// pinned by `IPV6_MULTICAST_IF` or the join, and the kernel may reject a
-/// nonzero scope on them, so the scope stays 0.
+/// Kernels only consult the scope ID for interface- and link-local addresses
+/// (RFC 4007 zones). Only `ffx1::` and `ffx2::` groups therefore carry the
+/// `ifindex` in the socket address. Wider-scope groups are already pinned by
+/// `IPV6_MULTICAST_IF` or the join, and the kernel may reject a nonzero
+/// scope on them. Their scope stays 0.
 fn v6_multicast_scope_id(group: Ipv6Addr, ifindex: u32) -> u32 {
     if matches!(group.segments()[0] & 0x000f, 1 | 2) {
         ifindex

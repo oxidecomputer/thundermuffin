@@ -32,21 +32,23 @@ export RUST_LOG=info
 
 BIN=/opt/oxide/thundermuffin/bin/thundermuffin
 if [[ ! -x "$BIN" ]]; then
-    echo "thundermuffin binary not found at $BIN" >&2
-    exit 1
+	echo "thundermuffin binary not found at $BIN" >&2
+	exit 1
 fi
 
 # Read an optional property, normalizing svcprop's representation of
-# "nothing there" to an empty string. svcprop -c quotes astring values, so
-# an empty value is emitted as a literal pair of double quotes. An unset
-# property makes svcprop fail entirely. Both cases collapse to "".
+# "nothing there" to an empty string.
+#
+# svcprop -c quotes astring values, and an empty value comes out as a literal
+# pair of double quotes. An unset property makes svcprop fail entirely.
+# Both cases collapse to "".
 svcprop_optional() {
-    local value
-    value=$(svcprop -c -p "$1" "${SMF_FMRI}" 2>/dev/null) || value=""
-    if [[ "$value" == '""' ]]; then
-        value=""
-    fi
-    printf '%s' "$value"
+	local value
+	value=$(svcprop -c -p "$1" "${SMF_FMRI}" 2>/dev/null) || value=""
+	if [[ "$value" == '""' ]]; then
+		value=""
+	fi
+	printf '%s' "$value"
 }
 
 # Multi-valued list of multicast groups to join and hold open. The illumos IP
@@ -58,11 +60,11 @@ svcprop_optional() {
 groups=$(svcprop_optional config/multicast_group)
 
 if [[ -z "$groups" ]]; then
-    # No groups configured. Stay online but idle so the service does not
-    # flap. The sled-agent rewrites config and restarts the service when
-    # membership changes.
-    echo "no multicast groups configured; idling" >&2
-    exec sleep infinity
+	# No groups configured. Stay online but idle so the service does not
+	# flap. The sled-agent rewrites config and restarts the service when
+	# membership changes.
+	echo "no multicast groups configured; idling" >&2
+	exec sleep infinity
 fi
 
 # svc.startd sets SMF_FMRI in every method's environment, see smf_method(7)
@@ -72,43 +74,43 @@ port=$(svcprop -c -p config/port "${SMF_FMRI}")
 # Interface the joins should be pinned to (the probe's overlay port), as an
 # interface name or an IP address bound to it. The binary resolves it per
 # group family: the interface's IPv4 address for IP_MULTICAST_IF and the
-# IPv4 joins, its ifindex for IPV6_MULTICAST_IF and the IPv6 joins.
+# IPv4 joins; its ifindex for IPV6_MULTICAST_IF and the IPv6 joins.
 #
 # Note: this may be unset.
 iface=$(svcprop_optional config/multicast_iface)
 
 iface_args=()
 if [[ -n "$iface" ]]; then
-    iface_args=(--multicast-iface "$iface")
+	iface_args=(--multicast-iface "$iface")
 fi
 
 # Spawn one joiner per group.
 pids=()
 for entry in $groups; do
-    # svcprop -c quotes each astring value, so strip the surrounding quotes.
-    entry=${entry#\"}
-    entry=${entry%\"}
-    [[ -z "$entry" ]] && continue
-    # sled-agent encodes a source-specific (SSM) membership as
-    # `group@src1,src2` and an any-source (ASM) membership as a bare `group`.
-    # The `@` separator is not a shell metacharacter, so svcprop emits it
-    # verbatim.
-    #
-    # We split off the optional source list and pass one `--multicast-source`
-    # per source so an SSM group gets the INCLUDE-mode (S, G) join it requires.
-    group=${entry%%@*}
-    src_args=()
-    if [[ "$entry" == *"@"* ]]; then
-        sources=${entry#*@}
-        IFS=',' read -ra src_list <<< "$sources"
-        for src in "${src_list[@]}"; do
-            [[ -z "$src" ]] && continue
-            src_args+=(--multicast-source "$src")
-        done
-    fi
-    "$BIN" --transport udp --port "$port" "${iface_args[@]}" \
-        server "$group" "${src_args[@]}" &
-    pids+=("$!")
+	# svcprop -c quotes each astring value, so strip the surrounding quotes.
+	entry=${entry#\"}
+	entry=${entry%\"}
+	[[ -z "$entry" ]] && continue
+	# sled-agent encodes a source-specific (SSM) membership as
+	# `group@src1,src2` and an any-source (ASM) membership as a bare `group`.
+	# The `@` separator is not a shell metacharacter, so svcprop emits it
+	# verbatim.
+	#
+	# We split off the optional source list and pass one `--multicast-source`
+	# per source so an SSM group gets the INCLUDE-mode (S, G) join it requires.
+	group=${entry%%@*}
+	src_args=()
+	if [[ "$entry" == *"@"* ]]; then
+		sources=${entry#*@}
+		IFS=',' read -ra src_list <<<"$sources"
+		for src in "${src_list[@]}"; do
+			[[ -z "$src" ]] && continue
+			src_args+=(--multicast-source "$src")
+		done
+	fi
+	"$BIN" --transport udp --port "$port" "${iface_args[@]}" \
+		server "$group" "${src_args[@]}" &
+	pids+=("$!")
 done
 
 # If every entry stripped to an empty string (e.g., a multi-valued property
@@ -116,8 +118,8 @@ done
 # instead of calling `wait -n` with no pids, which returns 127 and would
 # restart-loop the service.
 if ((${#pids[@]} == 0)); then
-    echo "no non-empty multicast groups configured; idling" >&2
-    exec sleep infinity
+	echo "no non-empty multicast groups configured; idling" >&2
+	exec sleep infinity
 fi
 
 # Block on the joiners to keep the start method's process contract (created

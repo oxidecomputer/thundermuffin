@@ -55,9 +55,10 @@ struct Cli {
     /// selector resolves to: the interface's IPv4 address for `IP_MULTICAST_IF`
     /// and the IPv4 joins, or its interface index for `IPV6_MULTICAST_IF`, the
     /// IPv6 joins, and, for interface- and link-local groups, the bind
-    /// scope. When omitted the kernel selects the
-    /// interface from its routing table, which may not choose the intended
-    /// interface on hosts with multiple network interfaces.
+    /// scope.
+    ///
+    /// If omitted, the kernel picks an interface from its routing table. On a
+    /// host with more than one, it may not pick the intended one.
     #[arg(long)]
     multicast_iface: Option<InterfaceSelector>,
 
@@ -114,13 +115,16 @@ struct Server {
     multicast_source: Vec<IpAddr>,
 }
 
-/// Reject obviously-non-unicast addresses (multicast, unspecified, loopback)
-/// and non-routable sources (broadcast, link-local) at clap parse time so SSM
-/// misconfiguration surfaces as a CLI error rather than an opaque kernel
-/// `EADDRNOTAVAIL` after socket setup.
+/// Parse an SSM source, rejecting addresses that can't send forwarded
+/// traffic: multicast, unspecified, loopback, broadcast, link-local,
+/// `0.0.0.0/8` ([RFC 1122] §3.2.1.3), `240.0.0.0/4` ([RFC 1112] §4), and
+/// IPv4-mapped/compatible IPv6 ([RFC 4291] §2.5.5).
 ///
-/// This matches the source checks Dendrite applies at group creation
-/// (i.e., `dpd/src/mcast/validate.rs`).
+/// Checking at parse time lets clap reject bad sources up front.
+///
+/// [RFC 1112]: https://www.rfc-editor.org/rfc/rfc1112.html
+/// [RFC 1122]: https://www.rfc-editor.org/rfc/rfc1122.html
+/// [RFC 4291]: https://www.rfc-editor.org/rfc/rfc4291.html
 fn parse_unicast_ipaddr(s: &str) -> Result<IpAddr, String> {
     let addr: IpAddr = s
         .parse()
@@ -128,17 +132,32 @@ fn parse_unicast_ipaddr(s: &str) -> Result<IpAddr, String> {
     if addr.is_multicast() || addr.is_unspecified() || addr.is_loopback() {
         return Err(format!("must be a unicast address (got `{addr}`)"));
     }
-    let non_routable = match addr {
-        IpAddr::V4(v4) => v4.is_broadcast() || v4.is_link_local(),
-        IpAddr::V6(v6) => v6.is_unicast_link_local(),
+
+    let reason = match addr {
+        IpAddr::V4(v4) => match v4.octets() {
+            [255, 255, 255, 255] => Some("broadcast"),
+            [169, 254, ..] => Some("link-local"),
+            [0, ..] => Some("in 0.0.0.0/8 (RFC 1122 §3.2.1.3)"),
+            [240..=255, ..] => Some("in reserved 240.0.0.0/4 (RFC 1112 §4)"),
+            _ => None,
+        },
+        IpAddr::V6(v6) => match v6.segments() {
+            [0xfe80..=0xfebf, ..] => Some("link-local"),
+            [0, 0, 0, 0, 0, 0xffff, ..] => {
+                Some("IPv4-mapped (RFC 4291 §2.5.5.2)")
+            }
+            [0, 0, 0, 0, 0, 0, ..] => {
+                Some("IPv4-compatible (RFC 4291 §2.5.5.1)")
+            }
+            _ => None,
+        },
     };
-    if non_routable {
-        return Err(format!(
-            "must be a routable source address, not broadcast or link-local \
-             (got `{addr}`)"
-        ));
+    match reason {
+        Some(reason) => Err(format!(
+            "must be a routable source address, not {reason} (got `{addr}`)"
+        )),
+        None => Ok(addr),
     }
-    Ok(addr)
 }
 
 impl Server {
@@ -147,13 +166,10 @@ impl Server {
         cli: &Cli,
         cmd: &mut clap::Command,
     ) -> Result<(), clap::Error> {
-        // Match the control plane's admission rules for SSM destinations
-        // (reserved 232.0.0.0/24, non-allocatable IPv6 group IDs, unusable
-        // scopes). The rack never programs such a group, so a join would
-        // yield a silent zero-delivery reception.
-        if ssm::is_ssm_multicast(self.listen)
-            && let Err(msg) = ssm::validate_ssm_destination(self.listen)
-        {
+        // A join to an SSM null address or a non-forwardable scope receives
+        // no packets.
+        let is_ssm = ssm::is_ssm_multicast(self.listen);
+        if is_ssm && let Err(msg) = ssm::validate_ssm_destination(self.listen) {
             return Err(cmd.error(ErrorKind::ValueValidation, msg));
         }
         if self.multicast_source.is_empty() {
@@ -161,19 +177,21 @@ impl Server {
             // traffic. SSM defines no shared (*, G) tree: the host rules
             // (RFC 4607 §4.1) reject a source-less join to an SSM destination,
             // and Nexus only ever programs an SSM-range group as an (S, G)
-            // channel. The fabric forwards via a control-plane subscription
-            // rather than by snooping the guest's join, so a source-less join
-            // installs no usable reception state and yields a silent
-            // zero-delivery receive indistinguishable from a network
-            // regression.
+            // channel.
+            //
+            // The switch and OPTE forward from state the control plane
+            // programs, and neither snoops the guest's join. A source-less
+            // join installs nothing usable, and the run delivers zero
+            // packets, which could look like a network regression.
             //
             // We reject it so that the mismatch surfaces as a CLI error.
-            if ssm::is_ssm_multicast(self.listen) {
+            if is_ssm {
                 return Err(cmd.error(
                     ErrorKind::MissingRequiredArgument,
                     format!(
                         "`listen` {} is in the source-specific multicast (SSM) \
-                         range (232.0.0.0/8, ff3x::/32) but no sources were \
+                         range (232.0.0.0/8, ff3x::/32, ffbx::/32) but no \
+                         sources were \
                          supplied; an any-source join is undeliverable. Pass \
                          `--multicast-source` for an INCLUDE-mode (S, G) join",
                         self.listen
@@ -288,5 +306,53 @@ fn main() -> Result<()> {
     match cli.transport {
         Transport::Tcp => tcp::run(&cli),
         Transport::Udp => udp::run(&cli),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_unicast_ipaddr_accepts_routable_unicast() {
+        for accepted in [
+            "10.0.0.1",
+            "100.64.0.1",
+            "192.0.2.1",
+            "2001:db8::1",
+            "fd00::1",
+        ] {
+            assert_eq!(
+                parse_unicast_ipaddr(accepted),
+                Ok(accepted.parse().unwrap()),
+                "{accepted} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_unicast_ipaddr_rejects_unusable_sources() {
+        for (rejected, reason) in [
+            ("239.1.1.1", "must be a unicast address"),
+            ("ff3e::8000:1", "must be a unicast address"),
+            ("0.0.0.0", "must be a unicast address"),
+            ("::", "must be a unicast address"),
+            ("127.0.0.1", "must be a unicast address"),
+            ("::1", "must be a unicast address"),
+            ("255.255.255.255", "broadcast"),
+            ("169.254.1.1", "link-local"),
+            ("fe80::1", "link-local"),
+            ("0.1.2.3", "0.0.0.0/8"),
+            ("240.0.0.1", "240.0.0.0/4"),
+            ("::ffff:192.0.2.1", "IPv4-mapped"),
+            ("::192.0.2.1", "IPv4-compatible"),
+        ] {
+            let error = parse_unicast_ipaddr(rejected)
+                .expect_err(&format!("{rejected} should be rejected"));
+            assert!(
+                error.contains(reason),
+                "{rejected} rejected for the wrong reason: {error}"
+            );
+        }
     }
 }
